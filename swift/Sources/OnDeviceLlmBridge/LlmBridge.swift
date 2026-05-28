@@ -11,32 +11,46 @@ import FoundationModels
     // own this Task and can cancel it from outside the Kotlin coroutine.
     private var task: Task<Void, Never>?
 
+    // session/task are written from the calling coroutine thread (createSession,
+    // generate) and read/cleared from another thread via cancel()/close() — the Kotlin
+    // coroutine's cancellation handler runs off-thread. Guard every access so the
+    // cross-thread reads/writes are not a data race.
+    private let lock = NSLock()
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
     @objc public static func isAvailable() -> Bool {
         SystemLanguageModel.default.isAvailable
     }
 
     @objc public func createSession(_ instructions: String?) {
+        let newSession: LanguageModelSession
         if let instructions {
-            session = LanguageModelSession {
+            newSession = LanguageModelSession {
                 Instructions(instructions)
             }
         } else {
-            session = LanguageModelSession()
+            newSession = LanguageModelSession()
         }
+        withLock { session = newSession }
     }
 
     @objc public func generate(
         _ prompt: String,
         temperature: Double,
         maxTokens: Int32,
-        completion: @escaping (String?, Error?) -> Void
+        completion: @escaping @Sendable (String?, Error?) -> Void
     ) {
-        guard let session else {
+        guard let session = withLock({ session }) else {
             completion(nil, Self.notInitialized)
             return
         }
         let options = Self.options(temperature: temperature, maxTokens: maxTokens)
-        task = Task {
+        let newTask = Task {
             do {
                 let response = try await session.respond(to: prompt, options: options)
                 completion(response.content, nil)
@@ -44,21 +58,22 @@ import FoundationModels
                 completion(nil, error)
             }
         }
+        withLock { task = newTask }
     }
 
     @objc public func streamGenerate(
         _ prompt: String,
         temperature: Double,
         maxTokens: Int32,
-        onPartial: @escaping (String) -> Void,
-        completion: @escaping (Error?) -> Void
+        onPartial: @escaping @Sendable (String) -> Void,
+        completion: @escaping @Sendable (Error?) -> Void
     ) {
-        guard let session else {
+        guard let session = withLock({ session }) else {
             completion(Self.notInitialized)
             return
         }
         let options = Self.options(temperature: temperature, maxTokens: maxTokens)
-        task = Task {
+        let newTask = Task {
             do {
                 let stream = session.streamResponse(to: prompt, options: options)
                 for try await partial in stream {
@@ -69,13 +84,14 @@ import FoundationModels
                 completion(error)
             }
         }
+        withLock { task = newTask }
     }
 
     // Cancels the in-flight generation. Foundation Models stops at the next token
     // boundary and the pending generate()/streamGenerate() completes with a
     // CancellationError, which the Kotlin side discards on an already-cancelled call.
     @objc public func cancel() {
-        task?.cancel()
+        withLock { task }?.cancel()
     }
 
     // Kotlin cannot pass optional primitives across the @objc boundary, so a
@@ -97,8 +113,10 @@ import FoundationModels
     }
 
     @objc public func close() {
-        task?.cancel()
-        task = nil
-        session = nil
+        withLock {
+            task?.cancel()
+            task = nil
+            session = nil
+        }
     }
 }
