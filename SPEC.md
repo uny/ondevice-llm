@@ -46,7 +46,7 @@
 
 1. **Koog 非依存のコア API**: `OnDeviceGenerator`（`suspend generate()` / `Flow` ストリーミング）を提供し、フレームワーク無しで直接呼べる。
 2. **プラットフォームネイティブ API の KMP 統一**: Android = ML Kit GenAI Prompt API（Gemini Nano via AICore）、iOS = Apple Foundation Models（Swift ブリッジ経由）。
-3. **可用性チェック / ダウンロード**: `checkOnDeviceStatus()`, `downloadModel()`。
+3. **可用性チェック / ダウンロード**: `checkOnDeviceStatus()`, `downloadOnDeviceModel()`。
 4. **プラットフォーム差の吸収**: iOS の累積スナップショット→増分デルタ変換、単一セッションの直列化、Android のモデルキャッシュ/クローズ管理をコア内に隠蔽する。
 5. **最小依存**: `kotlinx-coroutines` のみ（+ 各プラットフォーム SDK）。**Koog も kotlinx-serialization も依存しない。**
 
@@ -95,6 +95,16 @@ sealed interface OnDeviceChunk {
 }
 
 /**
+ * The result of a single-shot [generate]. Mirrors the streaming [OnDeviceChunk.Done]
+ * so the two paths are symmetric; [finishReason] lets Android callers detect a LENGTH
+ * truncation (iOS always reports STOP).
+ */
+data class OnDeviceResponse(
+    val text: String,
+    val finishReason: OnDeviceFinishReason,
+)
+
+/**
  * Normalized finish reason.
  * - [STOP]: natural end.
  * - [LENGTH]: hit the output-token cap (Android can detect this; iOS cannot and
@@ -123,7 +133,7 @@ import kotlinx.coroutines.flow.Flow
  * Not for tool calling, moderation, or structured output — those are out of scope.
  */
 interface OnDeviceGenerator {
-    suspend fun generate(request: OnDeviceRequest): String
+    suspend fun generate(request: OnDeviceRequest): OnDeviceResponse
     fun generateStream(request: OnDeviceRequest): Flow<OnDeviceChunk>
     fun close()
 }
@@ -147,8 +157,23 @@ enum class OnDeviceStatus {
 
 expect suspend fun checkOnDeviceStatus(): OnDeviceStatus
 
-/** Triggers a model download where the platform supports it; returns true once AVAILABLE. */
-expect suspend fun downloadModel(): Boolean
+/** Progress of a [downloadOnDeviceModel] request. */
+sealed interface OnDeviceDownload {
+    data class InProgress(val fraction: Float?) : OnDeviceDownload
+    data object Completed : OnDeviceDownload
+    data class Failed(val status: OnDeviceStatus) : OnDeviceDownload
+}
+
+/**
+ * Triggers a model download where the platform supports it, emitting progress until a
+ * terminal Completed/Failed. Android reports real progress; iOS provisions transparently
+ * and emits a single terminal frame.
+ */
+expect fun downloadOnDeviceModel(): Flow<OnDeviceDownload>
+
+/** Collects [downloadOnDeviceModel] to completion; true once the model is available. */
+suspend fun Flow<OnDeviceDownload>.awaitAvailable(): Boolean =
+    lastOrNull() is OnDeviceDownload.Completed
 ```
 
 ### 2.4 増分デルタヘルパ（commonMain, internal）
@@ -214,7 +239,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 actual fun createOnDeviceGenerator(): OnDeviceGenerator = AndroidOnDeviceGenerator()
 
-class AndroidOnDeviceGenerator : OnDeviceGenerator {
+// clientFactory is overridable for a preconfigured client or a test fake; the default
+// Generation.getClient() resolves the app Context via ML Kit's own startup initializer.
+class AndroidOnDeviceGenerator(
+    private val clientFactory: () -> GenerativeModel = { Generation.getClient() },
+) : OnDeviceGenerator {
 
     private val closed = AtomicBoolean(false)
 
@@ -224,17 +253,18 @@ class AndroidOnDeviceGenerator : OnDeviceGenerator {
     private fun client(): GenerativeModel {
         check(!closed.get()) { "AndroidOnDeviceGenerator is closed" }
         cached?.let { return it }
-        return synchronized(lock) { cached ?: Generation.getClient().also { cached = it } }
+        return synchronized(lock) { cached ?: clientFactory().also { cached = it } }
     }
 
-    override suspend fun generate(request: OnDeviceRequest): String =
+    override suspend fun generate(request: OnDeviceRequest): OnDeviceResponse =
         try {
             val response = client().generateContent(request.toMlKitRequest())
-            response.candidates.firstOrNull()?.text.orEmpty()
+            val candidate = response.candidates.firstOrNull()
+            OnDeviceResponse(candidate?.text.orEmpty(), candidate?.finishReason.toFinishReason())
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            throw OnDeviceException("On-device inference failed", e)
+            throw OnDeviceInferenceException("On-device inference failed", e)
         }
 
     override fun generateStream(request: OnDeviceRequest): Flow<OnDeviceChunk> = flow {
@@ -249,7 +279,7 @@ class AndroidOnDeviceGenerator : OnDeviceGenerator {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            throw OnDeviceException("Streaming failed", e)
+            throw OnDeviceInferenceException("Streaming failed", e)
         }
     }
 
@@ -280,21 +310,25 @@ package dev.ynagai.ondevice
 
 import com.google.mlkit.genai.common.FeatureStatus
 import com.google.mlkit.genai.prompt.Generation
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 
-actual suspend fun checkOnDeviceStatus(): OnDeviceStatus {
+actual suspend fun checkOnDeviceStatus(): OnDeviceStatus =
+    Generation.getClient().checkStatus().toOnDeviceStatus()
+
+actual fun downloadOnDeviceModel(): Flow<OnDeviceDownload> = flow {
     val client = Generation.getClient()
-    return when (client.checkStatus()) {
-        FeatureStatus.AVAILABLE -> OnDeviceStatus.AVAILABLE
-        FeatureStatus.DOWNLOADABLE -> OnDeviceStatus.DOWNLOADABLE
-        FeatureStatus.DOWNLOADING -> OnDeviceStatus.DOWNLOADING
-        else -> OnDeviceStatus.UNAVAILABLE
-    }
+    // ML Kit reports progress but no total to derive a fraction from → indeterminate.
+    client.download().collect { emit(OnDeviceDownload.InProgress(fraction = null)) }
+    val status = client.checkStatus().toOnDeviceStatus()
+    emit(if (status == OnDeviceStatus.AVAILABLE) OnDeviceDownload.Completed else OnDeviceDownload.Failed(status))
 }
 
-actual suspend fun downloadModel(): Boolean {
-    val client = Generation.getClient()
-    client.download().collect { /* consume progress */ }
-    return client.checkStatus() == FeatureStatus.AVAILABLE
+private fun Int.toOnDeviceStatus(): OnDeviceStatus = when (this) {
+    FeatureStatus.AVAILABLE -> OnDeviceStatus.AVAILABLE
+    FeatureStatus.DOWNLOADABLE -> OnDeviceStatus.DOWNLOADABLE
+    FeatureStatus.DOWNLOADING -> OnDeviceStatus.DOWNLOADING
+    else -> OnDeviceStatus.UNAVAILABLE
 }
 ```
 
@@ -304,7 +338,7 @@ actual suspend fun downloadModel(): Boolean {
 package dev.ynagai.ondevice
 
 /** Wraps any platform inference failure. Koog-free replacement for LLMClientException. */
-class OnDeviceException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+class OnDeviceInferenceException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 ```
 
 ---
@@ -435,10 +469,10 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
     // Single Foundation Models session, one generation at a time → serialize.
     private val mutex = Mutex()
 
-    override suspend fun generate(request: OnDeviceRequest): String = mutex.withLock {
+    override suspend fun generate(request: OnDeviceRequest): OnDeviceResponse = mutex.withLock {
         try {
             bridge.createSession(request.systemInstruction)
-            suspendCancellableCoroutine { cont ->
+            val text = suspendCancellableCoroutine { cont ->
                 bridge.generate(
                     request.prompt,
                     request.temperature ?: UNSET_TEMPERATURE,
@@ -448,10 +482,12 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
                     else cont.resume(result.orEmpty())
                 }
             }
+            // No finish-reason signal on iOS → always STOP, same as the streaming path.
+            OnDeviceResponse(text, OnDeviceFinishReason.STOP)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            throw OnDeviceException("On-device inference failed", e)
+            throw OnDeviceInferenceException("On-device inference failed", e)
         }
     }
 
@@ -482,7 +518,7 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                throw OnDeviceException("Streaming failed", e)
+                throw OnDeviceInferenceException("Streaming failed", e)
             }
         }
     }.buffer(Channel.UNLIMITED)
@@ -504,16 +540,19 @@ private fun NSError.toException(): Exception =
 package dev.ynagai.ondevice
 
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import swiftPMImport.dev.ynagai.ondevice.OnDeviceLlmBridge // ⚠️ §4.2
 
 @OptIn(ExperimentalForeignApi::class)
 actual suspend fun checkOnDeviceStatus(): OnDeviceStatus =
     if (OnDeviceLlmBridge.isAvailable()) OnDeviceStatus.AVAILABLE else OnDeviceStatus.UNAVAILABLE
 
-@OptIn(ExperimentalForeignApi::class)
-actual suspend fun downloadModel(): Boolean =
-    // Apple manages model downloads transparently.
-    checkOnDeviceStatus() == OnDeviceStatus.AVAILABLE
+// Apple provisions the model transparently → emit a single terminal frame.
+actual fun downloadOnDeviceModel(): Flow<OnDeviceDownload> = flow {
+    val status = checkOnDeviceStatus()
+    emit(if (status == OnDeviceStatus.AVAILABLE) OnDeviceDownload.Completed else OnDeviceDownload.Failed(status))
+}
 ```
 
 ---
@@ -694,9 +733,10 @@ kotlin.jvm.target=21
   ```kotlin
   val generator = createOnDeviceGenerator()
   if (checkOnDeviceStatus() == OnDeviceStatus.AVAILABLE) {
-      val text = generator.generate(
+      val response = generator.generate(
           OnDeviceRequest(prompt = "Summarize: ...", maxOutputTokens = 200)
       )
+      println("${response.text} [${response.finishReason}]")
   }
   // streaming
   generator.generateStream(OnDeviceRequest(prompt = "...")).collect { chunk ->
@@ -729,7 +769,7 @@ kotlin.jvm.target=21
       override fun llmProvider() = OnDeviceLLMProvider
       override suspend fun execute(prompt: Prompt, model: LLModel, tools: List<ToolDescriptor>): Message.Assistant {
           require(tools.isEmpty()) { "On-device inference does not support tool calling" }
-          val text = generator.generate(prompt.toOnDeviceRequest())
+          val text = generator.generate(prompt.toOnDeviceRequest()).text
           return Message.Assistant(listOf(MessagePart.Text(text)), ResponseMetaInfo(Clock.System.now()))
       }
       override fun executeStreaming(...): Flow<StreamFrame> = flow {
@@ -762,7 +802,7 @@ ondevice-llm（本リポジトリ）を 0 から立ち上げる順序：
 1. [ ] `koog-ondevice` から wrapper / `gradlew` / `gradle/wrapper` / `.gitignore` をコピー。
 2. [ ] `settings.gradle.kts`・`gradle.properties`・`gradle/libs.versions.toml`・`build.gradle.kts` を §5 の内容で作成。
 3. [ ] `swift/` を移設し NSError ドメインを更新（§4.1）。
-4. [ ] `commonMain` にコア API を作成（§2: `OnDeviceRequest`, `OnDeviceChunk`, `OnDeviceFinishReason`, `OnDeviceGenerator`+`createOnDeviceGenerator` expect, `OnDeviceStatus`+`checkOnDeviceStatus`/`downloadModel` expect, `incrementalDelta`, `OnDeviceException`, 任意で `OnDeviceModelInfo`)。
+4. [ ] `commonMain` にコア API を作成（§2: `OnDeviceRequest`, `OnDeviceChunk`, `OnDeviceFinishReason`, `OnDeviceGenerator`+`createOnDeviceGenerator` expect, `OnDeviceStatus`+`OnDeviceDownload`+`checkOnDeviceStatus`/`downloadOnDeviceModel` expect, `incrementalDelta`, `OnDeviceResponse`, `OnDeviceInferenceException`, 任意で `OnDeviceModelInfo`)。
 5. [ ] `androidMain` を作成（§3）。`./gradlew compileAndroidMain` で通す。
 6. [ ] `iosMain` を作成（§4.3）。まず仮 import で `./gradlew compileKotlinIosSimulatorArm64` を走らせ、**生成された実際の `swiftPMImport.*` 名前空間**を確認して import を確定（§4.2）。再コンパイルで通す。
 7. [ ] `commonTest` を作成（§7、`IncrementalDeltaTest` 移植）。`./gradlew check` を通す。

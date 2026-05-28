@@ -38,11 +38,11 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
     @Volatile
     private var closed = false
 
-    override suspend fun generate(request: OnDeviceRequest): String = mutex.withLock {
+    override suspend fun generate(request: OnDeviceRequest): OnDeviceResponse = mutex.withLock {
         try {
             check(!closed) { "IosOnDeviceGenerator is closed" }
             bridge.createSession(request.systemInstruction)
-            suspendCancellableCoroutine { cont ->
+            val text = suspendCancellableCoroutine { cont ->
                 // Coroutine cancellation has no effect on the running Foundation Models
                 // generation by itself; forward it to the bridge so the device stops.
                 cont.invokeOnCancellation { bridge.cancel() }
@@ -55,10 +55,13 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
                     else cont.resume(result.orEmpty())
                 }
             }
+            // Foundation Models exposes no finish-reason signal (a maxTokens cutoff is a
+            // silent truncation), so we always report STOP — same as the streaming path.
+            OnDeviceResponse(text, OnDeviceFinishReason.STOP)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            throw OnDeviceException("On-device inference failed", e)
+            throw OnDeviceInferenceException("On-device inference failed", e)
         }
     }
 
@@ -96,7 +99,7 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                throw OnDeviceException("Streaming failed", e)
+                throw OnDeviceInferenceException("Streaming failed", e)
             }
         }
     }.buffer(Channel.UNLIMITED)

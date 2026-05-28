@@ -41,9 +41,10 @@ kotlin {
 ```kotlin
 val generator = createOnDeviceGenerator()
 if (checkOnDeviceStatus() == OnDeviceStatus.AVAILABLE) {
-    val text = generator.generate(
+    val response = generator.generate(
         OnDeviceRequest(prompt = "Summarize: ...", maxOutputTokens = 200)
     )
+    println("${response.text} [${response.finishReason}]")
 }
 
 // streaming
@@ -61,7 +62,13 @@ The `systemInstruction` field is delivered through each platform's native channe
 (Foundation Models `Instructions` on iOS; prepended to the prompt on Android). Do
 not inline system text into `prompt` yourself.
 
-On platforms that support it, trigger a model download with `downloadModel()`.
+On platforms that support it, trigger a model download with `downloadOnDeviceModel()`,
+which emits `OnDeviceDownload` progress until a terminal `Completed`/`Failed`. Collect it
+to drive a progress UI, or use `awaitAvailable()` if you only need the final result:
+
+```kotlin
+val ready = downloadOnDeviceModel().awaitAvailable()
+```
 
 ## iOS toolchain requirements
 

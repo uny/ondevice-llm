@@ -12,7 +12,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 actual fun createOnDeviceGenerator(): OnDeviceGenerator = AndroidOnDeviceGenerator()
 
-class AndroidOnDeviceGenerator : OnDeviceGenerator {
+/**
+ * [clientFactory] builds the ML Kit [GenerativeModel] lazily on first use. The default
+ * [Generation.getClient] resolves the application [android.content.Context] through ML
+ * Kit's own startup initializer, so no Context is threaded through this API. Override
+ * the factory to supply a preconfigured client (or a fake in tests).
+ */
+class AndroidOnDeviceGenerator(
+    private val clientFactory: () -> GenerativeModel = { Generation.getClient() },
+) : OnDeviceGenerator {
 
     private val closed = AtomicBoolean(false)
 
@@ -23,17 +31,18 @@ class AndroidOnDeviceGenerator : OnDeviceGenerator {
     private fun client(): GenerativeModel {
         check(!closed.get()) { "AndroidOnDeviceGenerator is closed" }
         cached?.let { return it }
-        return synchronized(lock) { cached ?: Generation.getClient().also { cached = it } }
+        return synchronized(lock) { cached ?: clientFactory().also { cached = it } }
     }
 
-    override suspend fun generate(request: OnDeviceRequest): String =
+    override suspend fun generate(request: OnDeviceRequest): OnDeviceResponse =
         try {
             val response = client().generateContent(request.toMlKitRequest())
-            response.candidates.firstOrNull()?.text.orEmpty()
+            val candidate = response.candidates.firstOrNull()
+            OnDeviceResponse(candidate?.text.orEmpty(), candidate?.finishReason.toFinishReason())
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            throw OnDeviceException("On-device inference failed", e)
+            throw OnDeviceInferenceException("On-device inference failed", e)
         }
 
     override fun generateStream(request: OnDeviceRequest): Flow<OnDeviceChunk> = flow {
@@ -48,7 +57,7 @@ class AndroidOnDeviceGenerator : OnDeviceGenerator {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            throw OnDeviceException("Streaming failed", e)
+            throw OnDeviceInferenceException("Streaming failed", e)
         }
     }
 

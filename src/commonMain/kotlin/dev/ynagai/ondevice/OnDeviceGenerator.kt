@@ -14,7 +14,7 @@ import kotlinx.coroutines.flow.Flow
  * Not for tool calling, moderation, or structured output — those are out of scope.
  */
 interface OnDeviceGenerator {
-    suspend fun generate(request: OnDeviceRequest): String
+    suspend fun generate(request: OnDeviceRequest): OnDeviceResponse
     fun generateStream(request: OnDeviceRequest): Flow<OnDeviceChunk>
     fun close()
 }
