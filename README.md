@@ -68,7 +68,7 @@ On platforms that support it, trigger a model download with `downloadModel()`.
 The iOS backend links against Apple's `FoundationModels` framework through a small
 Swift bridge resolved via Gradle's `swiftPMDependencies` (Experimental in Kotlin 2.4.0):
 
-- Xcode 16.x with the Swift 6.2 / iOS 26 SDK
+- Xcode 26.x with the Swift 6.2 / iOS 26 SDK
 - A local SwiftPM package (`swift/`) is built as part of the Kotlin/Native compile
 
 ## Limitations
@@ -76,6 +76,9 @@ Swift bridge resolved via Gradle's `swiftPMDependencies` (Experimental in Kotlin
 - No tool calling, moderation, or structured-output abstraction (platform APIs are
   immature; out of scope for this library).
 - iOS serializes generations (single Foundation Models session, one at a time).
+- Cancelling an in-flight iOS `generate()` / stream collection unwinds the coroutine
+  immediately, but the underlying on-device generation keeps running to completion
+  (the Swift bridge exposes no cancellation hook); a subsequent call waits behind it.
 - Finish reason: Android can report `LENGTH` (token cap hit); iOS cannot detect a
   `maxOutputTokens` cutoff and always reports `STOP`.
 - No desktop / web / JVM targets — Android and iOS only.

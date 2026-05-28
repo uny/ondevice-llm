@@ -707,7 +707,7 @@ kotlin.jvm.target=21
   }
   ```
 
-- iOS ツールチェーン要件（Xcode 16.x / Swift 6.2 / iOS 26 SDK、`swiftPMDependencies` は Experimental）。
+- iOS ツールチェーン要件（Xcode 26.x / Swift 6.2 / iOS 26 SDK、`swiftPMDependencies` は Experimental）。
 - Limitations（tool calling / moderation / structured output 非対応、iOS は逐次実行）。
 - 「Koog で使うなら `koog-ondevice` を見よ」へのリンク。
 
