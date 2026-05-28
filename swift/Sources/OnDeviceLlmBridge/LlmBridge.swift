@@ -4,6 +4,13 @@ import FoundationModels
 @objc public class OnDeviceLlmBridge: NSObject {
     private var session: LanguageModelSession?
 
+    // The in-flight generation, retained so cancel()/close() can stop it. Foundation
+    // Models honors Task cancellation (respond/streamResponse throw CancellationError),
+    // so cancelling frees the device instead of running an abandoned generation to
+    // completion. Manual completion handlers (rather than `async throws`) are used so we
+    // own this Task and can cancel it from outside the Kotlin coroutine.
+    private var task: Task<Void, Never>?
+
     @objc public static func isAvailable() -> Bool {
         SystemLanguageModel.default.isAvailable
     }
@@ -21,42 +28,54 @@ import FoundationModels
     @objc public func generate(
         _ prompt: String,
         temperature: Double,
-        maxTokens: Int32
-    ) async throws -> String {
+        maxTokens: Int32,
+        completion: @escaping (String?, Error?) -> Void
+    ) {
         guard let session else {
-            throw NSError(
-                domain: "dev.ynagai.ondevice",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Session not initialized"]
-            )
+            completion(nil, Self.notInitialized)
+            return
         }
-        let response = try await session.respond(
-            to: prompt,
-            options: Self.options(temperature: temperature, maxTokens: maxTokens)
-        )
-        return response.content
+        let options = Self.options(temperature: temperature, maxTokens: maxTokens)
+        task = Task {
+            do {
+                let response = try await session.respond(to: prompt, options: options)
+                completion(response.content, nil)
+            } catch {
+                completion(nil, error)
+            }
+        }
     }
 
     @objc public func streamGenerate(
         _ prompt: String,
         temperature: Double,
         maxTokens: Int32,
-        callback: @escaping (String) -> Void
-    ) async throws {
+        onPartial: @escaping (String) -> Void,
+        completion: @escaping (Error?) -> Void
+    ) {
         guard let session else {
-            throw NSError(
-                domain: "dev.ynagai.ondevice",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Session not initialized"]
-            )
+            completion(Self.notInitialized)
+            return
         }
-        let stream = session.streamResponse(
-            to: prompt,
-            options: Self.options(temperature: temperature, maxTokens: maxTokens)
-        )
-        for try await partial in stream {
-            callback(partial.content)
+        let options = Self.options(temperature: temperature, maxTokens: maxTokens)
+        task = Task {
+            do {
+                let stream = session.streamResponse(to: prompt, options: options)
+                for try await partial in stream {
+                    onPartial(partial.content)
+                }
+                completion(nil)
+            } catch {
+                completion(error)
+            }
         }
+    }
+
+    // Cancels the in-flight generation. Foundation Models stops at the next token
+    // boundary and the pending generate()/streamGenerate() completes with a
+    // CancellationError, which the Kotlin side discards on an already-cancelled call.
+    @objc public func cancel() {
+        task?.cancel()
     }
 
     // Kotlin cannot pass optional primitives across the @objc boundary, so a
@@ -69,7 +88,17 @@ import FoundationModels
         )
     }
 
+    private static var notInitialized: NSError {
+        NSError(
+            domain: "dev.ynagai.ondevice",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Session not initialized"]
+        )
+    }
+
     @objc public func close() {
+        task?.cancel()
+        task = nil
         session = nil
     }
 }

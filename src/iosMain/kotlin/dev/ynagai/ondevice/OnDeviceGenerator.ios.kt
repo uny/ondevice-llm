@@ -26,13 +26,18 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
 
     // A single Foundation Models session backs the bridge, and the device runs one
     // generation at a time, so serialize calls to avoid one request clobbering
-    // another's session mid-flight.
+    // another's session mid-flight. Cancellation tears the in-flight generation down
+    // (see bridge.cancel below), so the lock is freed promptly rather than held for an
+    // abandoned generation.
     private val mutex = Mutex()
 
     override suspend fun generate(request: OnDeviceRequest): String = mutex.withLock {
         try {
             bridge.createSession(request.systemInstruction)
             suspendCancellableCoroutine { cont ->
+                // Coroutine cancellation has no effect on the running Foundation Models
+                // generation by itself; forward it to the bridge so the device stops.
+                cont.invokeOnCancellation { bridge.cancel() }
                 bridge.generate(
                     request.prompt,
                     request.temperature ?: UNSET_TEMPERATURE,
@@ -58,6 +63,7 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
                 // previously seen text to recover incremental deltas.
                 var previous = ""
                 suspendCancellableCoroutine { cont ->
+                    cont.invokeOnCancellation { bridge.cancel() }
                     bridge.streamGenerate(
                         request.prompt,
                         request.temperature ?: UNSET_TEMPERATURE,

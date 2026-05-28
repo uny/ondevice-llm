@@ -76,9 +76,9 @@ Swift bridge resolved via Gradle's `swiftPMDependencies` (Experimental in Kotlin
 - No tool calling, moderation, or structured-output abstraction (platform APIs are
   immature; out of scope for this library).
 - iOS serializes generations (single Foundation Models session, one at a time).
-- Cancelling an in-flight iOS `generate()` / stream collection unwinds the coroutine
-  immediately, but the underlying on-device generation keeps running to completion
-  (the Swift bridge exposes no cancellation hook); a subsequent call waits behind it.
+- Cancelling an in-flight iOS `generate()` / stream collection forwards the
+  cancellation to Foundation Models, which stops generation at the next token boundary
+  and frees the device for the next call.
 - Finish reason: Android can report `LENGTH` (token cap hit); iOS cannot detect a
   `maxOutputTokens` cutoff and always reports `STOP`.
 - No desktop / web / JVM targets — Android and iOS only.
