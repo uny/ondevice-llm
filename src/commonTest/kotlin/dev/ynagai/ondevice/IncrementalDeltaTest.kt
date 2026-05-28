@@ -18,10 +18,11 @@ class IncrementalDeltaTest {
     }
 
     @Test
-    fun emitsOnlyDivergedTailWhenSnapshotRevisesPrefix() {
-        // Prior snapshot was "Hello wrold"; the corrected snapshot shares the
-        // common prefix "Hello wr" — only the diverged tail should be emitted,
-        // not the whole revised string (which would duplicate the prefix).
+    fun returnsDivergedTailBestEffortForNonMonotonicSnapshot() {
+        // A revised snapshot is not expected from Foundation Models, and an
+        // append-only delta stream cannot repair an already-emitted prefix. This
+        // pins the documented best-effort behavior (the diverged tail past the
+        // common prefix "Hello w"), not a correctness guarantee.
         assertEquals("orld", incrementalDelta("Hello wrold", "Hello world"))
     }
 

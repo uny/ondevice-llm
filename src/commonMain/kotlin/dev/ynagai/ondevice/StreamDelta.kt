@@ -9,9 +9,14 @@ package dev.ynagai.ondevice
  * duplicate the already-sent prefix.
  *
  * Returns the suffix of [cumulative] past its longest common prefix with
- * [previous]. When [cumulative] purely extends [previous] (the normal case) this
- * is the appended text; if a snapshot revises an earlier portion, only the
- * diverged tail is emitted instead of re-sending content the caller already has.
+ * [previous]. Foundation Models snapshots grow monotonically, so [previous] is
+ * normally a prefix of [cumulative] and this returns exactly the newly appended
+ * text.
+ *
+ * A non-monotonic snapshot (a revised or shortened prefix) cannot be represented
+ * in an append-only delta stream: text already emitted to the caller cannot be
+ * retracted. That case is not expected from the backend; this returns the diverged
+ * tail as a best effort but does not — and cannot — repair the earlier mismatch.
  */
 internal fun incrementalDelta(previous: String, cumulative: String): String =
     cumulative.substring(previous.commonPrefixWith(cumulative).length)
