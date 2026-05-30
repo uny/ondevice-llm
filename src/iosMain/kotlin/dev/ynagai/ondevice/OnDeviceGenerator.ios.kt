@@ -40,17 +40,8 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
     @Volatile
     private var closed = false
 
-    override suspend fun generate(request: OnDeviceRequest): OnDeviceResponse = mutex.withLock {
-        // Reuse after close() is a caller lifecycle error, not an inference failure, so the
-        // IllegalStateException propagates raw (see the OnDeviceGenerator contract) — never
-        // wrapped in OnDeviceInferenceException, which is reserved for the model itself.
-        check(!closed) { "IosOnDeviceGenerator is closed" }
-        val session = AFMLanguageModelSession(request.systemInstruction).also { this.session = it }
-        try {
-            // A close() racing the publish above may not have observed this session yet;
-            // re-check so a concurrent close() either trips this guard or, having seen the
-            // session, tears it down itself. The IllegalStateException catch keeps it raw.
-            check(!closed) { "IosOnDeviceGenerator is closed" }
+    override suspend fun generate(request: OnDeviceRequest): OnDeviceResponse =
+        withSession(request, "On-device inference failed") { session ->
             val text = suspendCancellableCoroutine { cont ->
                 // Coroutine cancellation has no effect on the running Foundation Models
                 // generation by itself; forward it to the session so the device stops.
@@ -67,68 +58,66 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
             // Foundation Models exposes no finish-reason signal (a maxTokens cutoff is a
             // silent truncation), so we always report STOP — same as the streaming path.
             OnDeviceResponse(text, OnDeviceFinishReason.STOP)
+        }
+
+    override fun generateStream(request: OnDeviceRequest): Flow<OnDeviceChunk> = channelFlow {
+        withSession(request, "Streaming failed") { session ->
+            // Apple Foundation Models emits cumulative snapshots, so diff against the
+            // previously seen text to recover incremental deltas.
+            var previous = ""
+            suspendCancellableCoroutine { cont ->
+                cont.invokeOnCancellation { session.cancel() }
+                session.streamResponseTo(
+                    request.prompt,
+                    request.temperature ?: UNSET_TEMPERATURE,
+                    request.maxOutputTokens ?: UNSET_MAX_TOKENS,
+                    { cumulative ->
+                        val text = cumulative.orEmpty()
+                        val delta = incrementalDelta(previous, text)
+                        previous = text
+                        // The flow uses an unlimited buffer (see buffer() below),
+                        // so trySend never drops a delta under backpressure.
+                        if (delta.isNotEmpty()) trySend(OnDeviceChunk.Delta(delta))
+                    },
+                ) { error ->
+                    if (error != null) cont.resumeWithException(error.toException())
+                    else cont.resume(Unit)
+                }
+            }
+            // Foundation Models exposes no finish-reason signal (a maxTokens cutoff
+            // is a silent truncation), so we always report STOP — unlike Android.
+            send(OnDeviceChunk.Done(OnDeviceFinishReason.STOP))
+        }
+    }.buffer(Channel.UNLIMITED)
+
+    // Serializes the call (the device runs one generation at a time), creates a per-call
+    // session published to [session] so the non-suspending close() can stop it, then tears
+    // it down in finally. The closed-check is doubled on purpose: the first gates entry; the
+    // second guards a close() that races the publish above — it either trips this guard or,
+    // having seen the session, tears it down itself. Reuse after close() is a caller
+    // lifecycle error, so the IllegalStateException propagates raw (see the OnDeviceGenerator
+    // contract) and is never wrapped in OnDeviceInferenceException, reserved for the model.
+    private suspend fun <T> withSession(
+        request: OnDeviceRequest,
+        failureMessage: String,
+        block: suspend (AFMLanguageModelSession) -> T,
+    ): T = mutex.withLock {
+        check(!closed) { "IosOnDeviceGenerator is closed" }
+        val session = AFMLanguageModelSession(request.systemInstruction).also { this.session = it }
+        try {
+            check(!closed) { "IosOnDeviceGenerator is closed" }
+            block(session)
         } catch (e: CancellationException) {
             throw e
         } catch (e: IllegalStateException) {
             throw e
         } catch (e: Exception) {
-            throw OnDeviceInferenceException("On-device inference failed", e)
+            throw OnDeviceInferenceException(failureMessage, e)
         } finally {
             session.close()
             this.session = null
         }
     }
-
-    override fun generateStream(request: OnDeviceRequest): Flow<OnDeviceChunk> = channelFlow {
-        mutex.withLock {
-            // Reuse after close() is a caller lifecycle error, not an inference failure, so the
-            // IllegalStateException propagates raw (see the OnDeviceGenerator contract) — never
-            // wrapped in OnDeviceInferenceException, which is reserved for the model itself.
-            check(!closed) { "IosOnDeviceGenerator is closed" }
-            val session = AFMLanguageModelSession(request.systemInstruction)
-                .also { this@IosOnDeviceGenerator.session = it }
-            try {
-                // A close() racing the publish above may not have observed this session yet;
-                // re-check so a concurrent close() either trips this guard or, having seen
-                // the session, tears it down itself. The IllegalStateException catch keeps it raw.
-                check(!closed) { "IosOnDeviceGenerator is closed" }
-                // Apple Foundation Models emits cumulative snapshots, so diff against the
-                // previously seen text to recover incremental deltas.
-                var previous = ""
-                suspendCancellableCoroutine { cont ->
-                    cont.invokeOnCancellation { session.cancel() }
-                    session.streamResponseTo(
-                        request.prompt,
-                        request.temperature ?: UNSET_TEMPERATURE,
-                        request.maxOutputTokens ?: UNSET_MAX_TOKENS,
-                        { cumulative ->
-                            val text = cumulative.orEmpty()
-                            val delta = incrementalDelta(previous, text)
-                            previous = text
-                            // The flow uses an unlimited buffer (see buffer() below),
-                            // so trySend never drops a delta under backpressure.
-                            if (delta.isNotEmpty()) trySend(OnDeviceChunk.Delta(delta))
-                        },
-                    ) { error ->
-                        if (error != null) cont.resumeWithException(error.toException())
-                        else cont.resume(Unit)
-                    }
-                }
-                // Foundation Models exposes no finish-reason signal (a maxTokens cutoff
-                // is a silent truncation), so we always report STOP — unlike Android.
-                send(OnDeviceChunk.Done(OnDeviceFinishReason.STOP))
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: IllegalStateException) {
-                throw e
-            } catch (e: Exception) {
-                throw OnDeviceInferenceException("Streaming failed", e)
-            } finally {
-                session.close()
-                this@IosOnDeviceGenerator.session = null
-            }
-        }
-    }.buffer(Channel.UNLIMITED)
 
     override fun close() {
         closed = true
