@@ -21,9 +21,10 @@ kotlin {
 
     swiftPMDependencies {
         iosMinimumDeploymentTarget.set("26.0")
-        localSwiftPackage(
-            directory = project.layout.projectDirectory.dir("swift"),
-            products = listOf("OnDeviceLlmBridge"),
+        swiftPackage(
+            url = url("https://github.com/uny/foundation-models-objc.git"),
+            version = exact("1.0.0"),
+            products = listOf(product("FoundationModelsObjC")),
         )
     }
 

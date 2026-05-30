@@ -29,13 +29,16 @@ class AndroidOnDeviceGenerator(
     private val lock = Any()
 
     private fun client(): GenerativeModel {
-        check(!closed.get()) { "AndroidOnDeviceGenerator is closed" }
         cached?.let { return it }
         return synchronized(lock) { cached ?: clientFactory().also { cached = it } }
     }
 
-    override suspend fun generate(request: OnDeviceRequest): OnDeviceResponse =
-        try {
+    override suspend fun generate(request: OnDeviceRequest): OnDeviceResponse {
+        // Reuse after close() is a caller lifecycle error, not an inference failure, so the
+        // IllegalStateException propagates raw (see the OnDeviceGenerator contract) — never
+        // wrapped in OnDeviceInferenceException, which is reserved for the model itself.
+        check(!closed.get()) { "AndroidOnDeviceGenerator is closed" }
+        return try {
             val response = client().generateContent(request.toMlKitRequest())
             val candidate = response.candidates.firstOrNull()
             OnDeviceResponse(candidate?.text.orEmpty(), candidate?.finishReason.toFinishReason())
@@ -44,8 +47,12 @@ class AndroidOnDeviceGenerator(
         } catch (e: Exception) {
             throw OnDeviceInferenceException("On-device inference failed", e)
         }
+    }
 
     override fun generateStream(request: OnDeviceRequest): Flow<OnDeviceChunk> = flow {
+        // Reuse after close() is a caller lifecycle error, not an inference failure, so the
+        // IllegalStateException propagates raw (see the OnDeviceGenerator contract).
+        check(!closed.get()) { "AndroidOnDeviceGenerator is closed" }
         try {
             var finishReason: Int? = null
             client().generateContentStream(request.toMlKitRequest()).collect { chunk ->
