@@ -6,6 +6,5 @@
 build
 captures
 local.properties
-swift/.build
-swift/.swiftpm
+# swiftPM remote-package checkout/resolution cache, regenerated on every iOS build
 .swiftpm-locks
