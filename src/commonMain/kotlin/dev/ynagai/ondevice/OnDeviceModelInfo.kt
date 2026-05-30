@@ -14,3 +14,10 @@ data class OnDeviceModelInfo(
         val AppleFoundation = OnDeviceModelInfo("apple-foundation", contextLength = 4_096, maxOutputTokens = 2_048)
     }
 }
+
+/**
+ * The on-device model native to the current platform — Gemini Nano on Android,
+ * Apple Foundation Models on iOS. Lets common code select the right model without
+ * branching on platform.
+ */
+expect val OnDeviceModelInfo.Companion.platformDefault: OnDeviceModelInfo
