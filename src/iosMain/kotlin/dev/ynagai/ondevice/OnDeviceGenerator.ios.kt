@@ -41,9 +41,16 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
     private var closed = false
 
     override suspend fun generate(request: OnDeviceRequest): OnDeviceResponse = mutex.withLock {
+        // Reuse after close() is a caller lifecycle error, not an inference failure, so the
+        // IllegalStateException propagates raw (see the OnDeviceGenerator contract) — never
+        // wrapped in OnDeviceInferenceException, which is reserved for the model itself.
         check(!closed) { "IosOnDeviceGenerator is closed" }
         val session = AFMLanguageModelSession(request.systemInstruction).also { this.session = it }
         try {
+            // A close() racing the publish above may not have observed this session yet;
+            // re-check so a concurrent close() either trips this guard or, having seen the
+            // session, tears it down itself. The IllegalStateException catch keeps it raw.
+            check(!closed) { "IosOnDeviceGenerator is closed" }
             val text = suspendCancellableCoroutine { cont ->
                 // Coroutine cancellation has no effect on the running Foundation Models
                 // generation by itself; forward it to the session so the device stops.
@@ -62,6 +69,8 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
             OnDeviceResponse(text, OnDeviceFinishReason.STOP)
         } catch (e: CancellationException) {
             throw e
+        } catch (e: IllegalStateException) {
+            throw e
         } catch (e: Exception) {
             throw OnDeviceInferenceException("On-device inference failed", e)
         } finally {
@@ -72,10 +81,17 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
 
     override fun generateStream(request: OnDeviceRequest): Flow<OnDeviceChunk> = channelFlow {
         mutex.withLock {
+            // Reuse after close() is a caller lifecycle error, not an inference failure, so the
+            // IllegalStateException propagates raw (see the OnDeviceGenerator contract) — never
+            // wrapped in OnDeviceInferenceException, which is reserved for the model itself.
             check(!closed) { "IosOnDeviceGenerator is closed" }
             val session = AFMLanguageModelSession(request.systemInstruction)
                 .also { this@IosOnDeviceGenerator.session = it }
             try {
+                // A close() racing the publish above may not have observed this session yet;
+                // re-check so a concurrent close() either trips this guard or, having seen
+                // the session, tears it down itself. The IllegalStateException catch keeps it raw.
+                check(!closed) { "IosOnDeviceGenerator is closed" }
                 // Apple Foundation Models emits cumulative snapshots, so diff against the
                 // previously seen text to recover incremental deltas.
                 var previous = ""
@@ -102,6 +118,8 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
                 // is a silent truncation), so we always report STOP — unlike Android.
                 send(OnDeviceChunk.Done(OnDeviceFinishReason.STOP))
             } catch (e: CancellationException) {
+                throw e
+            } catch (e: IllegalStateException) {
                 throw e
             } catch (e: Exception) {
                 throw OnDeviceInferenceException("Streaming failed", e)
