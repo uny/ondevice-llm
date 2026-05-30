@@ -132,6 +132,10 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
 
     override fun close() {
         closed = true
+        // Idempotent by design: foundation-models-objc's close()/cancel() read-and-clear the
+        // retained Task atomically under a lock, so a finally-block close() racing this one (or
+        // any double close on the same session) is a safe no-op — close() only cancels the
+        // in-flight Task, it frees no native resource that could be double-freed.
         session?.close()
     }
 }
