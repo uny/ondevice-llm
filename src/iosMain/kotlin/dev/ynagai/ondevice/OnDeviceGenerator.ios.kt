@@ -16,6 +16,7 @@ import swiftPMImport.dev.ynagai.ondevice.ondevice.llm.AFMGenerationOptions
 import swiftPMImport.dev.ynagai.ondevice.ondevice.llm.AFMLanguageModelSession
 // AFMSamplingMode is a typealias for NSInteger (cinterop maps the SWIFT_ENUM to a
 // Long), so the cases are imported as top-level constants, not enum entries.
+import swiftPMImport.dev.ynagai.ondevice.ondevice.llm.AFMSamplingModeNucleus
 import swiftPMImport.dev.ynagai.ondevice.ondevice.llm.AFMSamplingModeTopK
 import kotlin.concurrent.Volatile
 import kotlin.coroutines.resume
@@ -132,6 +133,13 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
 // own sentinel defaults already encode "unset" (temperature = -1, maximumResponseTokens
 // = 0, samplingMode = .default, samplingSeed = -1), so set only the fields the request
 // actually specifies and leave the rest at the model default.
+//
+// Foundation Models threads a seed only through .topK / .nucleus sampling — there is no
+// "seed the default sampling" mode, so a seed left under .default is silently dropped by
+// AFMGenerationOptions.resolved(). To keep [seed] effective independently of [topK]
+// (matching Android, where setSeed applies on its own), a seed-only request selects
+// nucleus sampling over the full distribution (probabilityThreshold = 1.0): the seeded
+// equivalent of the model's default sampling.
 @OptIn(ExperimentalForeignApi::class)
 private fun OnDeviceRequest.toAfmOptions(): AFMGenerationOptions =
     AFMGenerationOptions().apply {
@@ -141,7 +149,13 @@ private fun OnDeviceRequest.toAfmOptions(): AFMGenerationOptions =
             samplingMode = AFMSamplingModeTopK
             samplingTopK = it.toLong()
         }
-        this@toAfmOptions.seed?.let { samplingSeed = it.toLong() }
+        this@toAfmOptions.seed?.let {
+            if (this@toAfmOptions.topK == null) {
+                samplingMode = AFMSamplingModeNucleus
+                samplingProbabilityThreshold = 1.0
+            }
+            samplingSeed = it.toLong()
+        }
     }
 
 private fun NSError.toException(): Exception =
