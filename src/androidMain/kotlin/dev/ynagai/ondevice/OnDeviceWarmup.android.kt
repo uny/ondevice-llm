@@ -4,22 +4,21 @@ import com.google.mlkit.genai.prompt.TextPart
 import com.google.mlkit.genai.prompt.generateContentRequest
 import kotlinx.coroutines.CancellationException
 
-actual suspend fun warmUpOnDevice() {
-    try {
-        capabilityClient.warmup()
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        // Best-effort per the contract: safe to call when the model is unavailable.
-    }
-}
-
-actual suspend fun countOnDeviceTokens(request: OnDeviceRequest): Int? = try {
-    val mlRequest = generateContentRequest(TextPart(request.toPromptText())) {}
-    capabilityClient.countTokens(mlRequest).totalTokens
+// Both capabilities are best-effort per their contract: safe to call when the model
+// is unavailable, so any failure is swallowed (cancellation still propagates).
+private suspend fun <T> bestEffort(block: suspend () -> T): T? = try {
+    block()
 } catch (e: CancellationException) {
     throw e
 } catch (e: Exception) {
-    // Token counting needs the model present; treat any failure as "unknown".
     null
+}
+
+actual suspend fun warmUpOnDevice() {
+    bestEffort { capabilityClient.warmup() }
+}
+
+actual suspend fun countOnDeviceTokens(request: OnDeviceRequest): Int? = bestEffort {
+    val mlRequest = generateContentRequest(TextPart(request.toPromptText())) {}
+    capabilityClient.countTokens(mlRequest).totalTokens
 }
