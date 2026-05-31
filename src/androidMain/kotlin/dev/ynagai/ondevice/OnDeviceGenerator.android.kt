@@ -81,6 +81,8 @@ class AndroidOnDeviceGenerator(
         generateContentRequest(TextPart(toPromptText())) {
             this@toMlKitRequest.temperature?.let { temperature = it.toFloat() }
             this@toMlKitRequest.maxOutputTokens?.let { maxOutputTokens = it }
+            this@toMlKitRequest.topK?.let { topK = it }
+            this@toMlKitRequest.seed?.let { seed = it }
         }
 
     private fun Int?.toFinishReason(): OnDeviceFinishReason = when (this) {

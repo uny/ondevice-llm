@@ -24,7 +24,7 @@ kotlin {
         iosMinimumDeploymentTarget.set("26.0")
         swiftPackage(
             url = url("https://github.com/uny/foundation-models-objc.git"),
-            version = exact("1.0.0"),
+            version = exact("1.2.0"),
             products = listOf(product("FoundationModelsObjC")),
         )
     }
