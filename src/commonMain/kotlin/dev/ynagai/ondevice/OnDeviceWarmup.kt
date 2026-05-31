@@ -6,7 +6,9 @@ package dev.ynagai.ondevice
  * safe to call repeatedly.
  *
  * - Android: ML Kit `GenerativeModel.warmup()`.
- * - iOS: Foundation Models `LanguageModelSession.prewarm()` (process-shared weights).
+ * - iOS: currently a no-op — Foundation Models `prewarm()` is not yet exposed by
+ *   `foundation-models-objc`. Calling it stays safe and will warm the
+ *   process-shared model weights once that lands.
  */
 expect suspend fun warmUpOnDevice()
 
