@@ -14,6 +14,7 @@ kotlin {
         minSdk = libs.versions.android.minSdk.get().toInt()
         compilerOptions { jvmTarget.set(JvmTarget.JVM_21) }
         namespace = "dev.ynagai.ondevice"
+        withHostTestBuilder {}
     }
     iosArm64()
     iosSimulatorArm64()
@@ -38,6 +39,9 @@ kotlin {
         }
         androidMain.dependencies {
             implementation(libs.mlkit.genai.prompt)
+        }
+        getByName("androidHostTest").dependencies {
+            implementation(libs.kotlin.test)
         }
     }
 }
