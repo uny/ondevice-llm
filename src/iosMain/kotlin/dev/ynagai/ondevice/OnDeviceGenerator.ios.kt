@@ -138,8 +138,11 @@ class IosOnDeviceGenerator : OnDeviceGenerator {
 // "seed the default sampling" mode, so a seed left under .default is silently dropped by
 // AFMGenerationOptions.resolved(). To keep [seed] effective independently of [topK]
 // (matching Android, where setSeed applies on its own), a seed-only request selects
-// nucleus sampling over the full distribution (probabilityThreshold = 1.0): the seeded
-// equivalent of the model's default sampling.
+// nucleus sampling over the full distribution (probabilityThreshold = 1.0) — a seeded,
+// full-distribution sample. That is the closest seedable stand-in for default sampling,
+// not a guaranteed match for the model's own default strategy (which resolved() leaves
+// as sampling = nil); a seed is meaningless under greedy decoding, so full-distribution
+// nucleus is the only honest place to apply it.
 @OptIn(ExperimentalForeignApi::class)
 private fun OnDeviceRequest.toAfmOptions(): AFMGenerationOptions =
     AFMGenerationOptions().apply {
