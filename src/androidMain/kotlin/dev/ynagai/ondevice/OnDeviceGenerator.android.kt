@@ -78,7 +78,7 @@ class AndroidOnDeviceGenerator(
 
     // ML Kit has no dedicated system channel, so the system instruction is prepended.
     private fun OnDeviceRequest.toMlKitRequest() =
-        generateContentRequest(TextPart(systemInstruction?.let { "$it\n\n$prompt" } ?: prompt)) {
+        generateContentRequest(TextPart(toPromptText())) {
             this@toMlKitRequest.temperature?.let { temperature = it.toFloat() }
             this@toMlKitRequest.maxOutputTokens?.let { maxOutputTokens = it }
         }
@@ -89,3 +89,11 @@ class AndroidOnDeviceGenerator(
         else -> OnDeviceFinishReason.STOP
     }
 }
+
+/**
+ * The exact text ML Kit receives for [this] request. Shared by generation and token
+ * counting so the count reflects what generation actually sends — ML Kit has no
+ * dedicated system channel, so the system instruction is prepended to the prompt.
+ */
+internal fun OnDeviceRequest.toPromptText(): String =
+    systemInstruction?.let { "$it\n\n$prompt" } ?: prompt
